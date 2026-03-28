@@ -356,6 +356,25 @@ def main():
         print(f"\n[{now}] Proveryavam za novi obyavi...")
 
         listings = fetch_listings_selenium(driver)
+
+        # Browser crashed — restart and login again
+        if listings == [] and driver is not None:
+            try:
+                driver.title  # test if session is alive
+            except Exception:
+                print(f"[{now}] Browser se srinal. Restartirам...")
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                time.sleep(5)
+                driver = init_driver_and_login()
+                if not driver:
+                    print("Login ne uspya pri restart!")
+                    time.sleep(30)
+                    continue
+                listings = fetch_listings_selenium(driver)
+
         print(f"[{now}] Namereni {len(listings)} obyavi.")
 
         new_listings = [l for l in listings if l["id"] not in seen_ids]
@@ -375,7 +394,7 @@ def main():
                 for listing in new_listings:
                     send_telegram(format_message(listing))
                     seen_ids.add(listing["id"])
-                    time.sleep(1)
+                    time.sleep(2)
                 save_seen_ids(seen_ids)
             else:
                 print(f"[{now}] Nyama novi obyavi.")
