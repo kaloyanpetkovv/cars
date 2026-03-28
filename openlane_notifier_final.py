@@ -55,6 +55,7 @@ def init_driver_and_login():
     options.add_argument("--log-level=3")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.binary_location = "/usr/bin/chromium-browser"
 
     driver = webdriver.Chrome(options=options)
     wait = WebDriverWait(driver, 30)
