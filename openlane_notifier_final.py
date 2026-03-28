@@ -5,7 +5,8 @@ import time
 import os
 from datetime import datetime
 from selenium import webdriver
-from selenium.webdriver.edge.options import Options
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
@@ -44,15 +45,18 @@ def send_telegram(message: str):
 
 
 def init_driver_and_login():
-    print("Startiram Edge za login...")
+    print("Startiram Chrome za login...")
     options = Options()
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
-    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-    driver = webdriver.Edge(options=options)
+    driver = webdriver.Chrome(options=options)
     wait = WebDriverWait(driver, 30)
 
     driver.get("https://www.openlane.eu/bg/home")
