@@ -60,12 +60,13 @@ def init_driver_and_login():
     driver = webdriver.Chrome(options=options)
     wait = WebDriverWait(driver, 30)
 
-    driver.get("https://www.openlane.eu/bg/home")
+    # Go directly to login page
+    driver.get("https://www.openlane.eu/bg/login")
     time.sleep(4)
 
     # Cookie banner
     try:
-        btn = wait.until(EC.element_to_be_clickable(
+        btn = WebDriverWait(driver, 8).until(EC.element_to_be_clickable(
             (By.XPATH, "//button[contains(text(),'Приемане на всички') or contains(text(),'Accept all') or contains(text(),'accept')]")
         ))
         btn.click()
@@ -73,17 +74,6 @@ def init_driver_and_login():
         time.sleep(2)
     except:
         print("Nyama cookie baner.")
-
-    # Login button
-    try:
-        vhod = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//a[normalize-space()='Вход'] | //button[normalize-space()='Вход'] | //a[contains(@href,'login')] | //button[contains(text(),'Login')]")
-        ))
-        vhod.click()
-        print("Vhod buton natisnat.")
-        time.sleep(3)
-    except Exception as e:
-        print(f"Ne moga da natisna Vhod: {e}")
 
     # Username
     username_field = wait.until(EC.presence_of_element_located(
