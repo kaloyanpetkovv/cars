@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 import time
 import os
 from datetime import datetime
@@ -68,7 +69,7 @@ def init_driver_and_login():
     except:
         print("Nyama cookie baner.")
 
-    # Login бутон
+    # Login button
     try:
         vhod = wait.until(EC.element_to_be_clickable(
             (By.XPATH, "//a[normalize-space()='Вход'] | //button[normalize-space()='Вход'] | //a[contains(@href,'login')] | //button[contains(text(),'Login')]")
@@ -91,7 +92,7 @@ def init_driver_and_login():
     print("Enter sled username.")
     time.sleep(3)
 
-    # Парола
+    # Password
     pass_field = wait.until(EC.presence_of_element_located(
         (By.XPATH, "//input[@type='password']")
     ))
@@ -102,7 +103,6 @@ def init_driver_and_login():
     pass_field.send_keys(Keys.RETURN)
     print("Enter sled parola.")
 
-    # Изчакай реален login — URL да се смени
     try:
         WebDriverWait(driver, 20).until(
             lambda d: "login" not in d.current_url and d.current_url != "https://www.openlane.eu/bg/home"
@@ -116,46 +116,99 @@ def init_driver_and_login():
     return driver
 
 
-def wait_for_listings(driver, timeout=20):
-    """Изчаква да се заредят листинги на страницата."""
-    end_time = time.time() + timeout
-    while time.time() < end_time:
-        src = driver.page_source
-        # Проверяваме дали __NEXT_DATA__ има vehicles
-        if "__NEXT_DATA__" in src:
-            try:
-                soup = BeautifulSoup(src, "html.parser")
-                script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
-                if script_tag:
-                    data = json.loads(script_tag.string)
-                    vehicles = extract_vehicles_from_next_data(data)
-                    if vehicles:
-                        return True
-            except:
-                pass
-        time.sleep(1)
-    return False
+def parse_cards_from_html(soup) -> list:
+    """
+    Primary extraction using confirmed selector: section.rc-CarCardDesktop
+    Verified from page_debug.html - 20 cards found with this selector.
+    Page is server-side rendered, no __NEXT_DATA__ or XHR needed.
+    """
+    cards = soup.select("section.rc-CarCardDesktop")
+    print(f"HTML cards (rc-CarCardDesktop): {len(cards)}")
+
+    listings = []
+    for card in cards:
+        title_link = card.select_one("h3.title > a")
+        if not title_link:
+            continue
+
+        href = title_link.get("href", "")
+        match = re.search(r'auctionId=(\d+)', href)
+        listing_id = match.group(1) if match else ""
+        if not listing_id:
+            continue
+
+        link = "https://www.openlane.eu" + href
+
+        # Title from span.strong inside the link
+        title_span = title_link.select_one("span.strong")
+        if title_span:
+            title = title_span.get_text(strip=True)
+        else:
+            title = title_link.get_text(strip=True).split(" - ")[0].strip()
+
+        # Mileage is in the full title text: "Make Model ... - 140.998 km"
+        full_text = title_link.get_text(strip=True)
+        km_match = re.search(r'[\d\.\s]+\s*km', full_text, re.IGNORECASE)
+        km = km_match.group(0).strip() if km_match else ""
+
+        # Price and registration date from auction-details grid
+        price = "N/A"
+        year = ""
+        details = card.select_one("div.auction-details")
+        if details:
+            rows = details.select("div.columns")
+            for row in rows:
+                price_spans = row.select("span.strong")
+                if price_spans:
+                    price = price_spans[0].get_text(strip=True)
+                    break
+            for row in rows:
+                data_spans = row.select("span.data")
+                if data_spans:
+                    year = data_spans[0].get_text(strip=True)
+                    break
+
+        listings.append({
+            "id": listing_id,
+            "title": title,
+            "price": price,
+            "year": year,
+            "km": km,
+            "link": link,
+        })
+
+    return listings
 
 
-def extract_vehicles_from_next_data(data: dict) -> list:
-    """Рекурсивно търси vehicles в __NEXT_DATA__."""
+def extract_vehicles_from_next_data(data) -> list:
+    """Fallback: recursively search for vehicle lists in __NEXT_DATA__."""
     vehicles = []
+    visited = set()
+
+    def looks_like_vehicle(obj):
+        if not isinstance(obj, dict):
+            return False
+        return bool({"make", "vehicleId", "lotId", "uuid", "vin", "auctionId"} & set(obj.keys()))
 
     def search(obj, depth=0):
-        if depth > 10:
+        if depth > 12:
             return
+        obj_id = id(obj)
+        if obj_id in visited:
+            return
+        visited.add(obj_id)
         if isinstance(obj, list):
-            # Ако е списък от обекти с "make" или "id" — вероятно са vehicles
-            if len(obj) > 0 and isinstance(obj[0], dict):
-                if any(k in obj[0] for k in ("make", "vehicleId", "id", "uuid", "title")):
-                    vehicles.extend(obj)
-                    return
+            if obj and looks_like_vehicle(obj[0]):
+                vehicles.extend(obj)
+                return
             for item in obj:
                 search(item, depth + 1)
         elif isinstance(obj, dict):
-            if "vehicles" in obj and isinstance(obj["vehicles"], list) and len(obj["vehicles"]) > 0:
-                vehicles.extend(obj["vehicles"])
-                return
+            for key in ("vehicles", "items", "results", "lots", "auctions", "listings", "data", "cars"):
+                val = obj.get(key)
+                if isinstance(val, list) and val and looks_like_vehicle(val[0]):
+                    vehicles.extend(val)
+                    return
             for v in obj.values():
                 search(v, depth + 1)
 
@@ -163,57 +216,38 @@ def extract_vehicles_from_next_data(data: dict) -> list:
     return vehicles
 
 
-def try_extract_from_js_state(driver) -> list:
-    """Пробва да извлече данни директно от JavaScript window обекта."""
-    scripts = [
-        # Next.js page props
-        "return JSON.stringify(window.__NEXT_DATA__ || null);",
-        # Redux store
-        "return JSON.stringify(window.__REDUX_STATE__ || window.__INITIAL_STATE__ || null);",
-        # Generic search results
-        "return JSON.stringify(window.searchResults || window.vehicleResults || null);",
-    ]
-    for script in scripts:
-        try:
-            result = driver.execute_script(script)
-            if result and result != "null":
-                data = json.loads(result)
-                if data:
-                    vehicles = extract_vehicles_from_next_data(data)
-                    if vehicles:
-                        print(f"JS injection: {len(vehicles)} vehicles nameren.")
-                        return vehicles
-        except:
-            pass
-    return []
-
-
 def fetch_listings_selenium(driver):
     try:
         driver.get(OPENLANE_SEARCH_URL)
-        print("Stranicata se zarежда...")
+        print("Stranicata se zarejda...")
 
-        # Изчакай поне нещо да се появи
+        # Wait for car cards to appear
         try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "main"))
+            WebDriverWait(driver, 25).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "section.rc-CarCardDesktop"))
             )
         except:
-            pass
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "main"))
+                )
+            except:
+                pass
+            time.sleep(3)
 
-        # Изчакай динамичното съдържание
-        wait_for_listings(driver, timeout=15)
-        time.sleep(3)  # Extra буфер
-
-        # Запази debug файл
+        # Save debug file
         with open("page_debug.html", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
         print("Debug HTML zapisano v page_debug.html")
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        listings = []
 
-        # ── Опит 1: __NEXT_DATA__ (най-надежден за Next.js сайтове) ──
+        # -- Attempt 1: section.rc-CarCardDesktop (confirmed working) --
+        listings = parse_cards_from_html(soup)
+        if listings:
+            return listings
+
+        # -- Attempt 2: __NEXT_DATA__ fallback --
         script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
         if script_tag:
             try:
@@ -222,7 +256,7 @@ def fetch_listings_selenium(driver):
                 print(f"__NEXT_DATA__: {len(vehicles)} vehicles.")
                 for item in vehicles:
                     listing_id = str(
-                        item.get("id") or item.get("uuid") or
+                        item.get("auctionId") or item.get("id") or item.get("uuid") or
                         item.get("vehicleId") or item.get("lotId") or ""
                     )
                     make  = item.get("make") or ""
@@ -250,86 +284,8 @@ def fetch_listings_selenium(driver):
             except Exception as e:
                 print(f"__NEXT_DATA__ parse greshka: {e}")
 
-        # ── Опит 2: JavaScript window injection ──
-        vehicles = try_extract_from_js_state(driver)
-        for item in vehicles:
-            listing_id = str(
-                item.get("id") or item.get("uuid") or
-                item.get("vehicleId") or item.get("lotId") or ""
-            )
-            make  = item.get("make") or ""
-            model = item.get("model") or ""
-            title = item.get("title") or f"{make} {model}".strip() or "Unknown"
-            price = item.get("price") or item.get("buyNowPrice") or "N/A"
-            year  = item.get("year") or item.get("firstRegistrationYear") or ""
-            km    = item.get("mileage") or item.get("km") or ""
-            link  = item.get("url") or item.get("detailUrl") or ""
-            if link and not link.startswith("http"):
-                link = "https://www.openlane.eu" + link
-            if not link:
-                link = OPENLANE_SEARCH_URL
-            if listing_id:
-                listings.append({
-                    "id": listing_id, "title": title,
-                    "price": price, "year": year,
-                    "km": km, "link": link
-                })
-        if listings:
-            return listings
-
-        # ── Опит 3: HTML cards — разширени селектори ──
-        selectors = [
-            "[data-vehicle-id]",
-            "[data-listing-id]",
-            "[data-testid*='vehicle']",
-            "[data-testid*='car']",
-            "[data-testid*='listing']",
-            ".vehicle-card",
-            ".car-card",
-            ".listing-card",
-            ".search-result-item",
-            "[class*='VehicleCard']",
-            "[class*='vehicleCard']",
-            "[class*='CarCard']",
-            "[class*='ListingCard']",
-            "[class*='ResultCard']",
-            "article[class*='card']",
-            "li[class*='vehicle']",
-            "li[class*='car']",
-        ]
-
-        cards = []
-        for sel in selectors:
-            found = soup.select(sel)
-            if found:
-                print(f"Selektor '{sel}': {len(found)} cards.")
-                cards.extend(found)
-                break  # Използваме първия работещ
-
-        print(f"HTML cards obshto: {len(cards)}")
-
-        for card in cards:
-            listing_id = (
-                card.get("data-vehicle-id") or card.get("data-listing-id") or
-                card.get("data-id") or card.get("data-lot-id") or ""
-            )
-            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='Title'], [class*='name'], [class*='Name']")
-            title = title_el.get_text(strip=True) if title_el else "Unknown"
-            price_el = card.select_one("[class*='price'], [class*='Price'], [class*='bid'], [class*='Bid']")
-            price = price_el.get_text(strip=True) if price_el else "N/A"
-            link_el = card.select_one("a[href]")
-            link = ("https://www.openlane.eu" + link_el["href"]) if link_el and link_el.get("href") else OPENLANE_SEARCH_URL
-            if not listing_id:
-                # Генерирай ID от линка ако няма data атрибут
-                listing_id = link.split("/")[-1].split("?")[0] if link != OPENLANE_SEARCH_URL else ""
-            if listing_id:
-                listings.append({
-                    "id": str(listing_id), "title": title,
-                    "price": price, "year": "", "km": "", "link": link
-                })
-
         if not listings:
-            print("ВНИМАНИЕ: 0 obyavi namereni! Proveri page_debug.html za HTML strukturata.")
+            print("VNIMANIE: 0 obyavi namereni! Proveri page_debug.html.")
 
         return listings
 
@@ -359,9 +315,9 @@ def format_message(listing: dict) -> str:
         f"🚗 <b>{listing['title']}</b>"
     ]
     if listing.get("year"):
-        parts.append(f"📅 Godina: {listing['year']}")
+        parts.append(f"📅 Registratsiya: {listing['year']}")
     if listing.get("km"):
-        parts.append(f"🛣 Probeg: {listing['km']} km")
+        parts.append(f"🛣 Probeg: {listing['km']}")
     if listing.get("price") and listing["price"] != "N/A":
         parts.append(f"💶 Cena: {listing['price']}")
     parts.append(f"🔗 <a href=\"{listing['link']}\">Viz obyavata</a>")
@@ -370,7 +326,7 @@ def format_message(listing: dict) -> str:
 
 def main():
     print("=" * 50)
-    print("OpenLane Telegram Notifier FINAL startiran")
+    print("OpenLane Telegram Notifier startiran")
     print(f"Proverka na vseki {CHECK_INTERVAL_SECONDS} sekundi")
     print("=" * 50)
 
@@ -401,7 +357,7 @@ def main():
             first_run = False
             if len(seen_ids) == 0:
                 print("[!] VNIMANIE: Ne sa namereni obyavi pri purvo startivane!")
-                print("[!] Proveri page_debug.html za da vidish HTML strukturata.")
+                print("[!] Proveri page_debug.html.")
         else:
             if new_listings:
                 print(f"[{now}] {len(new_listings)} novi obyavi!")
