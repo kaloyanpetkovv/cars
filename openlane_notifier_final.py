@@ -58,12 +58,12 @@ def init_driver_and_login():
     driver = webdriver.Chrome(options=options)
     wait = WebDriverWait(driver, 30)
 
-    # Go directly to login page
-    driver.get("https://www.openlane.eu/bg/login")
-    print(f"Login URL: {driver.current_url}")
-    time.sleep(5)
+    # Load home page first
+    driver.get("https://www.openlane.eu/bg/home")
+    print(f"Home URL: {driver.current_url}")
+    time.sleep(6)
 
-    # Save login page for debug
+    # Save home page for debug
     with open("login_debug.html", "w", encoding="utf-8") as f:
         f.write(driver.page_source)
     print("Login debug HTML zapisano v login_debug.html")
@@ -71,7 +71,7 @@ def init_driver_and_login():
     # Cookie banner
     try:
         btn = WebDriverWait(driver, 8).until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(text(),'Приемане на всички') or contains(text(),'Accept all') or contains(text(),'accept') or contains(@id,'accept')]")
+            (By.XPATH, "//button[contains(text(),'Приемане на всички') or contains(text(),'Accept all') or contains(text(),'accept') or contains(@id,'accept') or contains(@class,'accept')]")
         ))
         btn.click()
         print("Cookie baner zatvoren.")
@@ -79,16 +79,21 @@ def init_driver_and_login():
     except:
         print("Nyama cookie baner.")
 
-    # Username - try multiple selectors
+    # Click login button with JavaScript fallback
     try:
-        username_field = WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-            (By.XPATH, "//input[@type='text' or @type='email' or @name='username' or @name='email' or @id='username' or @id='email' or @autocomplete='username' or @autocomplete='email']")
+        vhod = WebDriverWait(driver, 10).until(EC.presence_of_element_located(
+            (By.XPATH, "//a[contains(@href,'login') or contains(@href,'Login')] | //button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login') or normalize-space()='Вход']")
         ))
-    except:
-        # fallback - any visible input
-        username_field = WebDriverWait(driver, 10).until(EC.presence_of_element_located(
-            (By.XPATH, "//input[not(@type='hidden') and not(@type='password')]")
-        ))
+        driver.execute_script("arguments[0].click();", vhod)
+        print("Vhod buton natisnat (JS).")
+        time.sleep(4)
+    except Exception as e:
+        print(f"Ne moga da natisna Vhod: {e}")
+
+    # Username
+    username_field = wait.until(EC.presence_of_element_located(
+        (By.XPATH, "//input[@type='text' or @type='email' or @name='username' or @name='email' or @id='username' or @id='email']")
+    ))
     username_field.clear()
     username_field.send_keys(OPENLANE_USERNAME)
     print(f"Username popolnen: {OPENLANE_USERNAME}")
