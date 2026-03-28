@@ -7,7 +7,7 @@ from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
@@ -234,6 +234,17 @@ def fetch_listings_selenium(driver):
             except:
                 pass
             time.sleep(3)
+
+        # Select "Първо най-новите" (Newest first)
+        try:
+            sort_select = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".sort-selector select"))
+            )
+            Select(sort_select).select_by_value("BatchStartDateForSorting|ascending")
+            print("Sort: Purvo naj-novite.")
+            time.sleep(3)
+        except Exception as e:
+            print(f"Sort ne e prilojen: {e}")
 
         # Save debug file
         with open("page_debug.html", "w", encoding="utf-8") as f:
