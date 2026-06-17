@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import json
 import re
+import sys
 import time
 import os
 from datetime import datetime
 from selenium import webdriver
-from selenium.webdriver.edge.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
@@ -13,12 +13,17 @@ from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
 import requests
 
+IS_WINDOWS = sys.platform.startswith("win")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROFILE_DIR = os.path.join(SCRIPT_DIR, "edge_profile" if IS_WINDOWS else "firefox_profile")
+
 # ============================================================
 TELEGRAM_BOT_TOKEN = "8634258923:AAEd_BZcTIxKPTQuzJ9hG9bFh0w2d2M_tWk"
 TELEGRAM_CHAT_ID   = "-5276167808"
 OPENLANE_USERNAME  = "kapitolia"
 OPENLANE_PASSWORD  = "Samsung@1"
 CHECK_INTERVAL_SECONDS = 60
+RESTART_AFTER_SECONDS = 6 * 60 * 60  # auto-restart browser every 6 hours
 SEEN_IDS_FILE = "seen_listings.json"
 
 OPENLANE_SEARCH_URL = "https://www.openlane.eu/bg/findcar?fuelTypes=100004&auctionTypes=2"
@@ -43,77 +48,139 @@ def send_telegram(message: str):
         print(f"Telegram greshka: {e}")
 
 
-def init_driver_and_login():
-    print("Startiram Edge za login...")
-    options = Options()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--log-level=3")
-    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+def _clean_profile_locks():
+    """Remove stale lockfiles left by a previous crashed run (Chromium + Firefox)."""
+    for name in ("lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket",
+                 "parent.lock", "lock", ".parentlock"):
+        p = os.path.join(PROFILE_DIR, name)
+        try:
+            if os.path.exists(p) or os.path.islink(p):
+                os.remove(p)
+        except Exception:
+            pass
 
-    driver = webdriver.Edge(options=options)
-    wait = WebDriverWait(driver, 30)
 
-    driver.get("https://www.openlane.eu/bg/home")
-    time.sleep(4)
-
-    # Cookie banner
-    try:
-        btn = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(text(),'Приемане на всички') or contains(text(),'Accept all') or contains(text(),'accept')]")
-        ))
-        btn.click()
-        print("Cookie baner zatvoren.")
-        time.sleep(2)
-    except:
-        print("Nyama cookie baner.")
-
-    # Login button
-    try:
-        vhod = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//a[normalize-space()='Вход'] | //button[normalize-space()='Вход'] | //a[contains(@href,'login')] | //button[contains(text(),'Login')]")
-        ))
-        vhod.click()
-        print("Vhod buton natisnat.")
-        time.sleep(3)
-    except Exception as e:
-        print(f"Ne moga da natisna Vhod: {e}")
-
-    # Username
-    username_field = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//input[@type='text' or @type='email' or @name='username' or @name='email' or @id='username' or @id='email']")
-    ))
-    username_field.clear()
-    username_field.send_keys(OPENLANE_USERNAME)
-    print(f"Username popolnen: {OPENLANE_USERNAME}")
-    time.sleep(1)
-    username_field.send_keys(Keys.RETURN)
-    print("Enter sled username.")
-    time.sleep(3)
-
-    # Password
-    pass_field = wait.until(EC.presence_of_element_located(
-        (By.XPATH, "//input[@type='password']")
-    ))
-    pass_field.clear()
-    pass_field.send_keys(OPENLANE_PASSWORD)
-    print("Parola popolnena.")
-    time.sleep(1)
-    pass_field.send_keys(Keys.RETURN)
-    print("Enter sled parola.")
-
-    try:
-        WebDriverWait(driver, 20).until(
-            lambda d: "login" not in d.current_url and d.current_url != "https://www.openlane.eu/bg/home"
-            or "home" in d.current_url
+def _kill_orphans_for_profile():
+    """Kill any browser/driver processes left over from a previous crashed run that are still holding our profile dir."""
+    import subprocess
+    proc_name = "msedge.exe" if IS_WINDOWS else "chrome"
+    driver_name = "msedgedriver.exe" if IS_WINDOWS else "chromedriver"
+    if IS_WINDOWS:
+        # PowerShell one-liner: find by command line containing our profile path, force-kill.
+        marker = os.path.basename(PROFILE_DIR)
+        ps = (
+            f"Get-CimInstance Win32_Process -Filter \"Name='{proc_name}' OR Name='{driver_name}'\" "
+            f"| Where-Object {{ $_.CommandLine -like '*{marker}*' }} "
+            f"| ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
         )
-    except:
-        pass
-    time.sleep(4)
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(["pkill", "-f", PROFILE_DIR], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
-    print(f"Lognat! URL: {driver.current_url}")
-    return driver
+
+def make_driver():
+    """Open the browser using the persistent profile. No login flow — relies on cookies in the profile."""
+    _kill_orphans_for_profile()
+    _clean_profile_locks()
+    if IS_WINDOWS:
+        print(f"Startiram Edge s profile: {PROFILE_DIR}")
+        from selenium.webdriver.edge.options import Options as EdgeOptions
+        options = EdgeOptions()
+        options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--log-level=3")
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        return webdriver.Edge(options=options)
+    else:
+        print(f"Startiram Firefox s profile: {PROFILE_DIR}")
+        from selenium.webdriver.firefox.options import Options as FFOptions
+        from selenium.webdriver.firefox.service import Service as FFService
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+        options = FFOptions()
+        options.add_argument("-profile")
+        options.add_argument(PROFILE_DIR)
+        options.add_argument("--width=1920")
+        options.add_argument("--height=1080")
+        svc = FFService("/usr/local/bin/geckodriver")
+        return webdriver.Firefox(service=svc, options=options)
+
+
+def is_logged_in(driver) -> bool:
+    """True iff past Cloudflare AND authenticated.
+
+    Authenticated state on the search URL is detected by the presence of car-card sections.
+    A Cloudflare challenge page has 'Just a moment' in the title; a login/SSO page shows a
+    password input. Anything else without cards is treated as not-ready.
+    """
+    try:
+        title = (driver.title or "").lower()
+    except Exception:
+        return False
+    if "just a moment" in title or "checking your browser" in title:
+        return False
+    if driver.find_elements(By.XPATH, "//input[@type='password']"):
+        return False
+    if driver.find_elements(By.CSS_SELECTOR, "section.rc-CarCardDesktop"):
+        return True
+    url = (driver.current_url or "").lower()
+    if "login" in url or "/auth" in url:
+        return False
+    return False
+
+
+def setup_mode():
+    print("=" * 60)
+    print("SETUP MODE — eднократен")
+    print("=" * 60)
+    print(f"Profile: {PROFILE_DIR}")
+    print()
+    print("Sega shte se otvori brauzur.")
+    print("1) Reshi 'Verify you are human' (ako se poyavi)")
+    print(f"2) Loginvai se s: {OPENLANE_USERNAME}")
+    print("3) Skriptat shte zapazi sesiata avtomatichno")
+    print()
+    print("Natisni Ctrl+C za otkazvane.")
+    print("=" * 60)
+
+    driver = make_driver()
+    driver.get(OPENLANE_SEARCH_URL)
+
+    try:
+        while True:
+            time.sleep(5)
+            if is_logged_in(driver):
+                print()
+                print("=" * 60)
+                print("✅ SETUP USPESHEN! Sesiata e zapazena v profila.")
+                print("Sega startirai normalno:")
+                print("    py openlane_notifier_final.py")
+                print("=" * 60)
+                time.sleep(3)
+                driver.quit()
+                return True
+            try:
+                cur = driver.current_url[:90]
+            except Exception:
+                cur = "?"
+            print(f"  Chakam login... ({cur})")
+    except KeyboardInterrupt:
+        print("\nOtkazano.")
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        return False
 
 
 def parse_cards_from_html(soup) -> list:
@@ -335,44 +402,85 @@ def format_message(listing: dict) -> str:
     return "\n".join(parts)
 
 
+def open_authenticated_driver():
+    """Open driver, navigate to search URL, and verify we're logged in. Returns driver or None."""
+    driver = make_driver()
+    driver.get(OPENLANE_SEARCH_URL)
+    time.sleep(8)
+    if not is_logged_in(driver):
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        return None
+    return driver
+
+
 def main():
+    if "--setup" in sys.argv:
+        setup_mode()
+        return
+
     print("=" * 50)
     print("OpenLane Telegram Notifier startiran")
     print(f"Proverka na vseki {CHECK_INTERVAL_SECONDS} sekundi")
     print("=" * 50)
 
-    driver = init_driver_and_login()
-    if not driver:
-        print("Login ne uspya!")
+    if not os.path.isdir(PROFILE_DIR):
+        print(f"❌ Nyama profile direktoria: {PROFILE_DIR}")
+        print("Startirai pravo:  py openlane_notifier_final.py --setup")
         return
 
-    send_telegram("✅ <b>OpenLane Notifier startiran!</b>\n\nLoginal sum se uspeshno!")
+    driver = open_authenticated_driver()
+    if not driver:
+        print("❌ Ne sum lognat ili Cloudflare blokira.")
+        print("Startirai otnovo: py openlane_notifier_final.py --setup")
+        send_telegram("⚠️ <b>OpenLane Notifier:</b> Sesiata izteche.\nStartirai <code>py openlane_notifier_final.py --setup</code> otnovo.")
+        return
 
-    seen_ids = load_seen_ids()
-    first_run = len(seen_ids) == 0
+    seen_ids = set()
+    first_run = True
+    driver_started_at = time.monotonic()
 
     while True:
         now = datetime.now().strftime("%H:%M:%S")
         print(f"\n[{now}] Proveryavam za novi obyavi...")
 
+        # Scheduled restart to keep browser memory in check.
+        if time.monotonic() - driver_started_at > RESTART_AFTER_SECONDS:
+            print(f"[{now}] Plaziran restart na brauzura (6h).")
+            try: driver.quit()
+            except Exception: pass
+            time.sleep(5)
+            driver = open_authenticated_driver()
+            if not driver:
+                print("Sesiata izteche pri plaziran restart.")
+                send_telegram("⚠️ <b>Sesiata izteche pri plaziran restart!</b> Startirai <code>--setup</code> otnovo.")
+                return
+            driver_started_at = time.monotonic()
+
         listings = fetch_listings_selenium(driver)
 
-        # Browser crashed — restart and login again
-        if listings == [] and driver is not None:
+        if not listings:
             try:
-                driver.title  # test if session is alive
+                driver.title  # session alive?
+                if not is_logged_in(driver):
+                    print(f"[{now}] ⚠️ Sesiata izteche.")
+                    send_telegram("⚠️ <b>Sesiata izteche!</b> Startirai <code>--setup</code> otnovo.")
+                    try: driver.quit()
+                    except Exception: pass
+                    return
             except Exception:
-                print(f"[{now}] Browser se srinal. Restartirам...")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                print(f"[{now}] Browser se srinal. Restartiram...")
+                try: driver.quit()
+                except Exception: pass
                 time.sleep(5)
-                driver = init_driver_and_login()
+                driver = open_authenticated_driver()
                 if not driver:
-                    print("Login ne uspya pri restart!")
-                    time.sleep(30)
-                    continue
+                    print("Sesiata izteche pri restart.")
+                    send_telegram("⚠️ <b>Sesiata izteche pri restart!</b> Startirai <code>--setup</code> otnovo.")
+                    return
+                driver_started_at = time.monotonic()
                 listings = fetch_listings_selenium(driver)
 
         print(f"[{now}] Namereni {len(listings)} obyavi.")
