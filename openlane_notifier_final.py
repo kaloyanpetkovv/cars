@@ -116,6 +116,15 @@ def make_driver():
         return webdriver.Firefox(service=svc, options=options)
 
 
+def is_cloudflare_challenge(driver) -> bool:
+    """Detect Cloudflare 'Verify you are human' / 'Just a moment' challenge page."""
+    try:
+        title = (driver.title or "").lower()
+    except Exception:
+        return False
+    return "just a moment" in title or "checking your browser" in title
+
+
 def is_logged_in(driver) -> bool:
     """True iff past Cloudflare AND authenticated.
 
@@ -476,23 +485,73 @@ def format_message(listing: dict) -> str:
 
 
 def open_authenticated_driver(notify_on_recovery: bool = True):
-    """Open driver, navigate to search URL, verify login. If session is dead, try auto-login.
-    Returns driver or None."""
-    driver = make_driver()
-    driver.get(OPENLANE_SEARCH_URL)
-    time.sleep(8)
-    if is_logged_in(driver):
-        return driver
-    print("Sesiata ne e aktivna — opitvam auto-login...")
-    if auto_login(driver) and is_logged_in(driver):
-        if notify_on_recovery:
-            send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
-        return driver
-    try:
-        driver.quit()
-    except Exception:
-        pass
-    return None
+    """Open driver, attempt login if needed. Retries indefinitely on Cloudflare captcha
+    with exponential backoff (5→10→20→30 min cap). Gives up after 3 genuine auth failures
+    (wrong creds / unexpected page) and returns None."""
+    captcha_delay = 5 * 60
+    captcha_max_delay = 30 * 60
+    captcha_notified = False
+    auth_fail_attempts = 0
+    recovered_from_problem = False
+
+    while True:
+        driver = make_driver()
+        driver.get(OPENLANE_SEARCH_URL)
+        time.sleep(8)
+
+        if is_logged_in(driver):
+            if notify_on_recovery and recovered_from_problem:
+                send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
+            return driver
+
+        if is_cloudflare_challenge(driver):
+            if not captcha_notified:
+                send_telegram(
+                    f"⚠️ <b>Cloudflare captcha detektiran.</b>\n"
+                    f"Skriptat shte opitva tiho na vseki {captcha_delay//60}–{captcha_max_delay//60} min "
+                    f"dokato se izchisti. Nyama nuzhda ot rachna namesa."
+                )
+                captcha_notified = True
+            print(f"Cloudflare detektiran. Chakam {captcha_delay}s i opitvam pak...")
+            try: driver.quit()
+            except Exception: pass
+            time.sleep(captcha_delay)
+            captcha_delay = min(captcha_delay * 2, captcha_max_delay)
+            recovered_from_problem = True
+            continue
+
+        print("Sesiata ne e aktivna — opitvam auto-login...")
+        if auto_login(driver) and is_logged_in(driver):
+            if notify_on_recovery:
+                send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
+            return driver
+
+        # Login attempt finished but we're still not logged in — check if Cloudflare appeared.
+        if is_cloudflare_challenge(driver):
+            if not captcha_notified:
+                send_telegram(
+                    f"⚠️ <b>Cloudflare captcha pri login.</b>\n"
+                    f"Skriptat shte opitva tiho na vseki {captcha_delay//60}–{captcha_max_delay//60} min "
+                    f"dokato se izchisti."
+                )
+                captcha_notified = True
+            print(f"Cloudflare pri login. Chakam {captcha_delay}s...")
+            try: driver.quit()
+            except Exception: pass
+            time.sleep(captcha_delay)
+            captcha_delay = min(captcha_delay * 2, captcha_max_delay)
+            recovered_from_problem = True
+            continue
+
+        auth_fail_attempts += 1
+        try: driver.quit()
+        except Exception: pass
+        if auth_fail_attempts >= 3:
+            print(f"Auth ne uspya {auth_fail_attempts} puti — otkazvam.")
+            return None
+        print(f"Auth opit {auth_fail_attempts}/3 ne uspya. Chakam 60s i opitvam pak...")
+        time.sleep(60)
+        recovered_from_problem = True
 
 
 def main():
