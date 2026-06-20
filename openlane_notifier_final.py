@@ -139,6 +139,79 @@ def is_logged_in(driver) -> bool:
     return False
 
 
+def auto_login(driver) -> bool:
+    """Perform username/password login on an existing driver. Returns True on success.
+    Reused when the persistent session expires so the script can recover without manual --setup.
+    May fail if Cloudflare shows a 'Verify you are human' challenge."""
+    print("Opitvam avtomatichen login...")
+    try:
+        driver.get("https://www.openlane.eu/bg/home")
+        time.sleep(4)
+        wait = WebDriverWait(driver, 30)
+
+        try:
+            btn = WebDriverWait(driver, 8).until(EC.element_to_be_clickable(
+                (By.XPATH, "//button[contains(text(),'Приемане на всички') or contains(text(),'Accept all') or contains(text(),'accept')]")
+            ))
+            btn.click()
+            print("Cookie baner zatvoren.")
+            time.sleep(2)
+        except Exception:
+            pass
+
+        try:
+            vhod = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "//a[normalize-space()='Вход'] | //button[normalize-space()='Вход'] | //a[contains(@href,'login')] | //button[contains(text(),'Login')]")
+            ))
+            try:
+                vhod.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", vhod)
+            print("Vhod buton natisnat.")
+            time.sleep(3)
+        except Exception as e:
+            print(f"Ne moga da natisna Vhod: {e}")
+
+        username_field = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//input[@type='text' or @type='email' or @name='username' or @name='email' or @id='username' or @id='email']")
+        ))
+        username_field.clear()
+        username_field.send_keys(OPENLANE_USERNAME)
+        print(f"Username popolnen: {OPENLANE_USERNAME}")
+        time.sleep(1)
+        username_field.send_keys(Keys.RETURN)
+        time.sleep(3)
+
+        pass_field = wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//input[@type='password']")
+        ))
+        pass_field.clear()
+        pass_field.send_keys(OPENLANE_PASSWORD)
+        print("Parola popolnena.")
+        time.sleep(1)
+        pass_field.send_keys(Keys.RETURN)
+
+        try:
+            WebDriverWait(driver, 25).until(
+                lambda d: not d.find_elements(By.XPATH, "//input[@type='password']")
+            )
+        except Exception:
+            pass
+        time.sleep(4)
+
+        driver.get(OPENLANE_SEARCH_URL)
+        time.sleep(6)
+        ok = is_logged_in(driver)
+        if ok:
+            print(f"✅ Auto-login uspeshen! URL: {driver.current_url}")
+        else:
+            print(f"❌ Auto-login ne uspya. URL: {driver.current_url}")
+        return ok
+    except Exception as e:
+        print(f"Auto-login greshka: {e}")
+        return False
+
+
 def setup_mode():
     print("=" * 60)
     print("SETUP MODE — eднократен")
@@ -402,18 +475,24 @@ def format_message(listing: dict) -> str:
     return "\n".join(parts)
 
 
-def open_authenticated_driver():
-    """Open driver, navigate to search URL, and verify we're logged in. Returns driver or None."""
+def open_authenticated_driver(notify_on_recovery: bool = True):
+    """Open driver, navigate to search URL, verify login. If session is dead, try auto-login.
+    Returns driver or None."""
     driver = make_driver()
     driver.get(OPENLANE_SEARCH_URL)
     time.sleep(8)
-    if not is_logged_in(driver):
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        return None
-    return driver
+    if is_logged_in(driver):
+        return driver
+    print("Sesiata ne e aktivna — opitvam auto-login...")
+    if auto_login(driver) and is_logged_in(driver):
+        if notify_on_recovery:
+            send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
+        return driver
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    return None
 
 
 def main():
@@ -431,11 +510,11 @@ def main():
         print("Startirai pravo:  py openlane_notifier_final.py --setup")
         return
 
-    driver = open_authenticated_driver()
+    driver = open_authenticated_driver(notify_on_recovery=False)
     if not driver:
-        print("❌ Ne sum lognat ili Cloudflare blokira.")
+        print("❌ Ne sum lognat — auto-login ne uspya (verojatno Cloudflare).")
         print("Startirai otnovo: py openlane_notifier_final.py --setup")
-        send_telegram("⚠️ <b>OpenLane Notifier:</b> Sesiata izteche.\nStartirai <code>py openlane_notifier_final.py --setup</code> otnovo.")
+        send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya (verojatno Cloudflare).\nStartirai <code>--setup</code> rachno.")
         return
 
     seen_ids = set()
@@ -454,8 +533,8 @@ def main():
             time.sleep(5)
             driver = open_authenticated_driver()
             if not driver:
-                print("Sesiata izteche pri plaziran restart.")
-                send_telegram("⚠️ <b>Sesiata izteche pri plaziran restart!</b> Startirai <code>--setup</code> otnovo.")
+                print("Auto-login ne uspya pri plaziran restart.")
+                send_telegram("⚠️ <b>Auto-login ne uspya pri plaziran restart!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
                 return
             driver_started_at = time.monotonic()
 
@@ -465,11 +544,16 @@ def main():
             try:
                 driver.title  # session alive?
                 if not is_logged_in(driver):
-                    print(f"[{now}] ⚠️ Sesiata izteche.")
-                    send_telegram("⚠️ <b>Sesiata izteche!</b> Startirai <code>--setup</code> otnovo.")
+                    print(f"[{now}] ⚠️ Sesiata izteche — opitvam auto-login...")
                     try: driver.quit()
                     except Exception: pass
-                    return
+                    time.sleep(5)
+                    driver = open_authenticated_driver()
+                    if not driver:
+                        send_telegram("⚠️ <b>Auto-login ne uspya!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
+                        return
+                    driver_started_at = time.monotonic()
+                    listings = fetch_listings_selenium(driver)
             except Exception:
                 print(f"[{now}] Browser se srinal. Restartiram...")
                 try: driver.quit()
@@ -477,8 +561,8 @@ def main():
                 time.sleep(5)
                 driver = open_authenticated_driver()
                 if not driver:
-                    print("Sesiata izteche pri restart.")
-                    send_telegram("⚠️ <b>Sesiata izteche pri restart!</b> Startirai <code>--setup</code> otnovo.")
+                    print("Auto-login ne uspya pri restart.")
+                    send_telegram("⚠️ <b>Auto-login ne uspya pri restart!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
                     return
                 driver_started_at = time.monotonic()
                 listings = fetch_listings_selenium(driver)
