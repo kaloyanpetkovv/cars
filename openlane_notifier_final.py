@@ -484,15 +484,14 @@ def format_message(listing: dict) -> str:
     return "\n".join(parts)
 
 
-def open_authenticated_driver(notify_on_recovery: bool = True):
+def open_authenticated_driver():
     """Open driver, attempt login if needed. Retries indefinitely on Cloudflare captcha
     with exponential backoff (5→10→20→30 min cap). Gives up after 3 genuine auth failures
-    (wrong creds / unexpected page) and returns None."""
+    (wrong creds / unexpected page) and returns None. Stays silent on Telegram — only the
+    caller alerts on final failure."""
     captcha_delay = 5 * 60
     captcha_max_delay = 30 * 60
-    captcha_notified = False
     auth_fail_attempts = 0
-    recovered_from_problem = False
 
     while True:
         driver = make_driver()
@@ -500,47 +499,27 @@ def open_authenticated_driver(notify_on_recovery: bool = True):
         time.sleep(8)
 
         if is_logged_in(driver):
-            if notify_on_recovery and recovered_from_problem:
-                send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
             return driver
 
         if is_cloudflare_challenge(driver):
-            if not captcha_notified:
-                send_telegram(
-                    f"⚠️ <b>Cloudflare captcha detektiran.</b>\n"
-                    f"Skriptat shte opitva tiho na vseki {captcha_delay//60}–{captcha_max_delay//60} min "
-                    f"dokato se izchisti. Nyama nuzhda ot rachna namesa."
-                )
-                captcha_notified = True
             print(f"Cloudflare detektiran. Chakam {captcha_delay}s i opitvam pak...")
             try: driver.quit()
             except Exception: pass
             time.sleep(captcha_delay)
             captcha_delay = min(captcha_delay * 2, captcha_max_delay)
-            recovered_from_problem = True
             continue
 
         print("Sesiata ne e aktivna — opitvam auto-login...")
         if auto_login(driver) and is_logged_in(driver):
-            if notify_on_recovery:
-                send_telegram("✅ <b>OpenLane Notifier:</b> Sesiata e obnovena avtomatichno.")
             return driver
 
         # Login attempt finished but we're still not logged in — check if Cloudflare appeared.
         if is_cloudflare_challenge(driver):
-            if not captcha_notified:
-                send_telegram(
-                    f"⚠️ <b>Cloudflare captcha pri login.</b>\n"
-                    f"Skriptat shte opitva tiho na vseki {captcha_delay//60}–{captcha_max_delay//60} min "
-                    f"dokato se izchisti."
-                )
-                captcha_notified = True
             print(f"Cloudflare pri login. Chakam {captcha_delay}s...")
             try: driver.quit()
             except Exception: pass
             time.sleep(captcha_delay)
             captcha_delay = min(captcha_delay * 2, captcha_max_delay)
-            recovered_from_problem = True
             continue
 
         auth_fail_attempts += 1
@@ -551,7 +530,6 @@ def open_authenticated_driver(notify_on_recovery: bool = True):
             return None
         print(f"Auth opit {auth_fail_attempts}/3 ne uspya. Chakam 60s i opitvam pak...")
         time.sleep(60)
-        recovered_from_problem = True
 
 
 def main():
@@ -569,11 +547,11 @@ def main():
         print("Startirai pravo:  py openlane_notifier_final.py --setup")
         return
 
-    driver = open_authenticated_driver(notify_on_recovery=False)
+    driver = open_authenticated_driver()
     if not driver:
-        print("❌ Ne sum lognat — auto-login ne uspya (verojatno Cloudflare).")
+        print("❌ Auto-login ne uspya 3 puti.")
         print("Startirai otnovo: py openlane_notifier_final.py --setup")
-        send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya (verojatno Cloudflare).\nStartirai <code>--setup</code> rachno.")
+        send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya 3 puti.\nNuzhna e rachna namesa: <code>--setup</code>.")
         return
 
     seen_ids = set()
@@ -593,7 +571,7 @@ def main():
             driver = open_authenticated_driver()
             if not driver:
                 print("Auto-login ne uspya pri plaziran restart.")
-                send_telegram("⚠️ <b>Auto-login ne uspya pri plaziran restart!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
+                send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya 3 puti pri plaziran restart.\nNuzhna e rachna namesa: <code>--setup</code>.")
                 return
             driver_started_at = time.monotonic()
 
@@ -609,7 +587,7 @@ def main():
                     time.sleep(5)
                     driver = open_authenticated_driver()
                     if not driver:
-                        send_telegram("⚠️ <b>Auto-login ne uspya!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
+                        send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya 3 puti sled izteche na sesiata.\nNuzhna e rachna namesa: <code>--setup</code>.")
                         return
                     driver_started_at = time.monotonic()
                     listings = fetch_listings_selenium(driver)
@@ -621,7 +599,7 @@ def main():
                 driver = open_authenticated_driver()
                 if not driver:
                     print("Auto-login ne uspya pri restart.")
-                    send_telegram("⚠️ <b>Auto-login ne uspya pri restart!</b> Verojatno Cloudflare. Startirai <code>--setup</code> rachno.")
+                    send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya 3 puti sled crash na brauzura.\nNuzhna e rachna namesa: <code>--setup</code>.")
                     return
                 driver_started_at = time.monotonic()
                 listings = fetch_listings_selenium(driver)
