@@ -7,9 +7,10 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/cars
-ExecStart=/usr/bin/python3 /home/ubuntu/cars/openlane_notifier_final.py
+ExecStart=/home/ubuntu/cars/run.sh
 Restart=always
-RestartSec=30
+RestartSec=20
+OOMScoreAdjust=-500
 StandardOutput=journal
 StandardError=journal
 
