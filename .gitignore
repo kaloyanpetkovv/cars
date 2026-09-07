@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Browser profiles (contain the logged-in session)
+edge_profile/
+firefox_profile/
+
+# Runtime state and debug output
+seen_listings.json
+cookies.json
+page_debug.html
+login_debug.html
+
+__pycache__/
+*.pyc

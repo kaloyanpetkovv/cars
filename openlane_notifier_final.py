@@ -18,19 +18,89 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(SCRIPT_DIR, "edge_profile" if IS_WINDOWS else "firefox_profile")
 
 # ============================================================
-TELEGRAM_BOT_TOKEN = "8634258923:AAEd_BZcTIxKPTQuzJ9hG9bFh0w2d2M_tWk"
-TELEGRAM_CHAT_ID   = "-5276167808"
-OPENLANE_USERNAME  = "kapitolia"
-OPENLANE_PASSWORD  = "Samsung@1"
-CHECK_INTERVAL_SECONDS = 60
-RESTART_AFTER_SECONDS = 6 * 60 * 60  # auto-restart browser every 6 hours
-SEEN_IDS_FILE = "seen_listings.json"
-
-OPENLANE_SEARCH_URL = "https://www.openlane.eu/bg/findcar?fuelTypes=100004&auctionTypes=2"
+# Configuration comes from environment variables, loaded from a .env file next to
+# this script if present. Never hard-code credentials here — this repo is public.
+# See .env.example for the required keys.
 # ============================================================
 
+def _load_dotenv():
+    """Minimal .env reader (KEY=VALUE per line). Real env vars always win."""
+    path = os.path.join(SCRIPT_DIR, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
 
-def send_telegram(message: str):
+
+_load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+OPENLANE_USERNAME  = os.environ.get("OPENLANE_USERNAME", "")
+OPENLANE_PASSWORD  = os.environ.get("OPENLANE_PASSWORD", "")
+
+CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
+RESTART_AFTER_SECONDS = 6 * 60 * 60  # auto-restart browser every 6 hours
+SEEN_IDS_FILE = os.path.join(SCRIPT_DIR, "seen_listings.json")
+
+# Cap the notification burst after downtime so a long outage can't flood the chat.
+MAX_BURST_NOTIFICATIONS = int(os.environ.get("MAX_BURST_NOTIFICATIONS", "10"))
+
+OPENLANE_SEARCH_URL = os.environ.get(
+    "OPENLANE_SEARCH_URL",
+    "https://www.openlane.eu/bg/findcar?fuelTypes=100004&auctionTypes=2",
+)
+
+
+def check_config() -> bool:
+    """Fail loudly at startup instead of silently dropping notifications later.
+
+    A revoked bot token is invisible at runtime — the scraper keeps working and every
+    send just prints an error — so verify it against getMe before entering the loop.
+    """
+    missing = [k for k, v in (
+        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+        ("OPENLANE_USERNAME", OPENLANE_USERNAME),
+        ("OPENLANE_PASSWORD", OPENLANE_PASSWORD),
+    ) if not v]
+    if missing:
+        print(f"❌ Lipsvat nastroyki: {', '.join(missing)}")
+        print(f"   Sazdai .env fail v {SCRIPT_DIR} (vij .env.example).")
+        return False
+
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=15
+        )
+    except Exception as e:
+        print(f"⚠️ Ne moga da proverya Telegram tokena (mreja): {e}")
+        return True  # network hiccup at boot shouldn't block the run
+
+    if not resp.ok:
+        print(f"❌ Telegram tokenat e nevaliden: {resp.status_code} - {resp.text}")
+        print("   Generirai nov token pri @BotFather i go sloji v .env.")
+        return False
+
+    bot_name = (resp.json().get("result") or {}).get("username", "?")
+    print(f"✅ Telegram bot OK: @{bot_name}")
+    return True
+
+
+def send_telegram(message: str) -> bool:
+    """Returns True only when Telegram accepted the message.
+
+    The caller must not mark a listing as seen unless this returns True, otherwise a
+    failed send loses that notification permanently.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -42,10 +112,12 @@ def send_telegram(message: str):
         resp = requests.post(url, json=payload, timeout=10)
         if resp.ok:
             print("Telegram: izprateno!")
-        else:
-            print(f"Telegram greshka: {resp.status_code} - {resp.text}")
+            return True
+        print(f"Telegram greshka: {resp.status_code} - {resp.text}")
+        return False
     except Exception as e:
         print(f"Telegram greshka: {e}")
+        return False
 
 
 def _clean_profile_locks():
@@ -123,6 +195,15 @@ def is_cloudflare_challenge(driver) -> bool:
     except Exception:
         return False
     return "just a moment" in title or "checking your browser" in title
+
+
+def is_maintenance(driver) -> bool:
+    try:
+        url = (driver.current_url or "").lower()
+        title = (driver.title or "").lower()
+    except Exception:
+        return False
+    return "maintenance" in url or "maintenance" in title
 
 
 def is_logged_in(driver) -> bool:
@@ -395,17 +476,19 @@ def fetch_listings_selenium(driver):
         except Exception as e:
             print(f"Sort ne e prilojen: {e}")
 
-        # Save debug file
-        with open("page_debug.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        print("Debug HTML zapisano v page_debug.html")
-
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
         # -- Attempt 1: section.rc-CarCardDesktop (confirmed working) --
         listings = parse_cards_from_html(soup)
         if listings:
             return listings
+
+        # Nothing parsed — dump the page so the selector break can be diagnosed.
+        # Only on failure: this runs every minute and the page is ~2.5 MB.
+        debug_path = os.path.join(SCRIPT_DIR, "page_debug.html")
+        with open(debug_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print(f"0 karti — debug HTML zapisano v {debug_path}")
 
         # -- Attempt 2: __NEXT_DATA__ fallback --
         script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
@@ -492,11 +575,23 @@ def open_authenticated_driver():
     captcha_delay = 5 * 60
     captcha_max_delay = 30 * 60
     auth_fail_attempts = 0
+    maintenance_notified = False
+    maintenance_delay = 10 * 60
 
     while True:
         driver = make_driver()
         driver.get(OPENLANE_SEARCH_URL)
         time.sleep(8)
+
+        if is_maintenance(driver):
+            print(f"OpenLane e v maintenance. Chakam {maintenance_delay}s i opitvam pak...")
+            if not maintenance_notified:
+                send_telegram("🔧 <b>OpenLane e v maintenance.</b> Shte opitvam pak na vseki 10 minuti.")
+                maintenance_notified = True
+            try: driver.quit()
+            except Exception: pass
+            time.sleep(maintenance_delay)
+            continue
 
         if is_logged_in(driver):
             return driver
@@ -542,6 +637,9 @@ def main():
     print(f"Proverka na vseki {CHECK_INTERVAL_SECONDS} sekundi")
     print("=" * 50)
 
+    if not check_config():
+        return
+
     if not os.path.isdir(PROFILE_DIR):
         print(f"❌ Nyama profile direktoria: {PROFILE_DIR}")
         print("Startirai pravo:  py openlane_notifier_final.py --setup")
@@ -554,8 +652,12 @@ def main():
         send_telegram("⚠️ <b>OpenLane Notifier:</b> Auto-login ne uspya 3 puti.\nNuzhna e rachna namesa: <code>--setup</code>.")
         return
 
-    seen_ids = set()
-    first_run = True
+    # Carry seen IDs across restarts. Starting from an empty set meant every restart
+    # silently swallowed everything posted while the notifier was down.
+    seen_ids = load_seen_ids()
+    first_run = not seen_ids
+    if seen_ids:
+        print(f"Zaredeni {len(seen_ids)} vech vidyani obyavi ot {SEEN_IDS_FILE}")
     driver_started_at = time.monotonic()
 
     while True:
@@ -620,10 +722,28 @@ def main():
         else:
             if new_listings:
                 print(f"[{now}] {len(new_listings)} novi obyavi!")
-                for listing in new_listings:
-                    send_telegram(format_message(listing))
-                    seen_ids.add(listing["id"])
+                to_send = new_listings[:MAX_BURST_NOTIFICATIONS]
+                skipped = new_listings[len(to_send):]
+
+                for listing in to_send:
+                    # Only mark as seen once Telegram accepted it, otherwise a transient
+                    # send failure would drop the listing permanently.
+                    if send_telegram(format_message(listing)):
+                        seen_ids.add(listing["id"])
+                    else:
+                        print(f"[{now}] Neuspeshno izprashtane za {listing['id']} — shte opitam pak.")
                     time.sleep(2)
+
+                if skipped:
+                    # Long downtime: summarise the tail instead of flooding the chat.
+                    if send_telegram(
+                        f"… i oshte <b>{len(skipped)}</b> novi obyavi "
+                        f"(potisnati, za da ne se zaleye chata).\n"
+                        f"<a href=\"{OPENLANE_SEARCH_URL}\">Viz vsichki</a>"
+                    ):
+                        for listing in skipped:
+                            seen_ids.add(listing["id"])
+
                 save_seen_ids(seen_ids)
             else:
                 print(f"[{now}] Nyama novi obyavi.")

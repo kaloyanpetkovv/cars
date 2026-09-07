@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenLane Telegram notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cars
+ExecStart=/usr/bin/python3 /home/ubuntu/cars/openlane_notifier_final.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
